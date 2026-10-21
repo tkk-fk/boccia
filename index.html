@@ -48,19 +48,19 @@ button:disabled{cursor:default}
 /* ===== ゲーム ===== */
 #game{display:grid;grid-template-rows:auto minmax(0,1fr) auto;grid-template-columns:minmax(0,1fr)}
 #hud{display:grid;grid-template-columns:1fr auto 1fr auto;align-items:center;gap:8px;padding:8px 10px 6px}
-.team{display:flex;align-items:center;gap:8px;min-width:0}
-.team.b{flex-direction:row-reverse}
-.score{min-width:56px;height:56px;border-radius:16px;color:#fff;font-size:34px;font-weight:900;
+.team{display:flex;flex-direction:column;align-items:flex-start;gap:5px;min-width:0}
+.team.b{align-items:flex-end}
+.score{min-width:52px;height:48px;padding:0 8px;border-radius:14px;color:#fff;font-size:30px;font-weight:900;
   display:flex;align-items:center;justify-content:center}
 .team.r .score{background:var(--red)} .team.b .score{background:var(--blue)}
-.left{display:flex;flex-wrap:wrap;gap:4px;max-width:96px}
-.team.b .left{justify-content:flex-end}
-.left i{width:14px;height:14px;border-radius:50%;display:block}
+.left{display:flex;flex-wrap:nowrap;gap:3px}
+.team.b .left{flex-direction:row-reverse}
+.left i{width:12px;height:12px;border-radius:50%;display:block;flex:none}
 .team.r .left i{background:var(--red)} .team.b .left i{background:var(--blue)}
 .left i.used{background:transparent!important;border:2px solid var(--line)}
 .mid{text-align:center}
 #endLabel{font-size:14px;color:var(--sub);font-weight:700}
-#turn{margin-top:2px;padding:6px 16px;border-radius:30px;color:#fff;font-size:20px;font-weight:900;white-space:nowrap}
+#turn{margin-top:2px;padding:6px 14px;border-radius:30px;color:#fff;font-size:19px;font-weight:900;white-space:nowrap}
 #menuBtn{width:44px;height:44px;border-radius:12px;border:2px solid var(--line);background:#fff;font-size:20px}
 
 #stage{position:relative;min-height:0;min-width:0}
@@ -168,14 +168,16 @@ button:disabled{cursor:default}
 'use strict';
 
 /* ---------- 定数（単位：メートル） ---------- */
-const W = 6, L = 12;              // コートの はば・ながさ
+// 公式コート 12.5m×6m ＝ スローイングエリア 2.5m ＋ プレイングエリア 10m
+const W = 6, L = 10, BOX = 2.5;   // はば・プレイングエリアの ながさ・ボックスの おくゆき
 const BR = 0.17, JR = 0.14;       // ボール半径（見やすさのため実物より大きめ）
 const DEC = 2.2;                  // ころがり減速 m/s²
 const E = 0.82;                   // はねかえり
 const DT = 1 / 240;
-const LAUNCH = { x: W / 2, y: -0.55 };
-const CROSS = { x: W / 2, y: 6.5 };
-const VIEW = { x0: -0.35, x1: W + 0.35, y0: -1.7, y1: L + 0.35 };
+const EPS = 1e-3;
+const LAUNCH = { x: W / 2, y: -0.6 };
+const CROSS = { x: W / 2, y: L / 2 }; // プレイングエリアの 中央
+const VIEW = { x0: -0.35, x1: W + 0.35, y0: -BOX - 0.1, y1: L + 0.35 };
 const SHAKE = [[0, 0], [0.035, 0.07], [0.08, 0.15]]; // [角度σ(rad), 距離σ(割合)]
 const CPU_SHAKE = [0.05, 0.1];
 const NAME = { r: 'あか', b: 'あお' };
@@ -192,24 +194,47 @@ function closest(balls, jack, team) {
   return m;
 }
 
-/* つぎに なげる チーム（null = エンドおわり） */
-function nextThrower(left, balls, jack, last) {
-  if (left.r <= 0 && left.b <= 0) return null;
-  if (left.r <= 0) return 'b';
-  if (left.b <= 0) return 'r';
+/* ジャックが Vラインを かんぜんに こえたか */
+const jackCrossed = j => (j.y - vLineY(j.x)) / Math.hypot(1, 0.5) >= j.r;
+/* ジャックが ジャック無効エリアに いるか（試合中） */
+const inJackInvalid = j => j.y < vLineY(j.x);
+
+/* つぎに なげる チーム（規則10.6〜10.7、10.11.4、10.13）
+   team: null = エンドおわり／ tie: 等距離かつ同点の じょうたい */
+function nextThrower(left, balls, jack, last, prevTie) {
+  if (left.r <= 0 && left.b <= 0) return { team: null, tie: false };
+  if (left.r <= 0) return { team: 'b', tie: false };
+  if (left.b <= 0) return { team: 'r', tie: false };
   const dr = closest(balls, jack, 'r'), db = closest(balls, jack, 'b');
-  if (dr === Infinity && db === Infinity) return last;
-  if (dr < db) return 'b';
-  if (db < dr) return 'r';
-  return other(last);
+  // コートに カラーボールが ない → さいごに なげた サイドが つづける
+  if (dr === Infinity && db === Infinity) return { team: last, tie: false };
+  if (Math.abs(dr - db) < EPS) {
+    const d = Math.min(dr, db);
+    const cnt = t => balls.filter(b => b.team === t && !b.dead && dist(b, jack) < d + EPS).length;
+    const cr = cnt('r'), cb = cnt('b');
+    if (cr === cb) return { team: prevTie ? other(last) : last, tie: true };
+    return { team: cr < cb ? 'r' : 'b', tie: false };
+  }
+  return { team: dr < db ? 'b' : 'r', tie: false };
+}
+
+/* ジャックを クロスに おく。ふさがって いれば クロスの まえ（スローイングライン がわ）の できるだけ ちかく */
+function placeJack(balls, jack) {
+  const others = balls.filter(b => b !== jack && !b.dead);
+  let y = CROSS.y;
+  for (let i = 0; i < 2000; i++, y -= 0.005) {
+    if (others.every(b => Math.hypot(b.x - CROSS.x, b.y - y) >= b.r + jack.r)) break;
+  }
+  jack.x = CROSS.x; jack.y = y; jack.vx = 0; jack.vy = 0; jack.dead = false; jack.out = false;
+  return jack;
 }
 
 /* エンドの とくてん */
 function scoreEnd(balls, jack) {
   const dr = closest(balls, jack, 'r'), db = closest(balls, jack, 'b');
   if (dr === Infinity && db === Infinity) return { team: null, pts: { r: 0, b: 0 }, ref: Infinity, scorers: [] };
-  if (Math.abs(dr - db) < 1e-3) {
-    const scorers = balls.filter(b => !b.dead && b.team !== 'j' && Math.abs(dist(b, jack) - dr) < 1e-3);
+  if (Math.abs(dr - db) < EPS) {
+    const scorers = balls.filter(b => !b.dead && b.team !== 'j' && Math.abs(dist(b, jack) - dr) < EPS);
     const pts = { r: 0, b: 0 }; scorers.forEach(b => pts[b.team]++);
     return { team: 'tie', pts, ref: dr, scorers };
   }
@@ -226,7 +251,7 @@ function clampMarker(m) {
   let dx = m.x - LAUNCH.x, dy = Math.max(0.9, m.y - LAUNCH.y);
   let ang = Math.atan2(dx, dy), d = Math.hypot(dx, dy);
   ang = Math.max(-1.1, Math.min(1.1, ang));
-  d = Math.max(1.2, Math.min(13.4, d));
+  d = Math.max(1.2, Math.min(11.2, d));
   let x = LAUNCH.x + Math.sin(ang) * d, y = LAUNCH.y + Math.cos(ang) * d;
   x = Math.max(VIEW.x0 + 0.1, Math.min(VIEW.x1 - 0.1, x));
   y = Math.max(0.3, Math.min(VIEW.y1 - 0.1, y));
@@ -241,7 +266,7 @@ function launchVelocity(target, shake, rnd) {
   let ang = Math.atan2(dx, dy) + gauss(rnd) * shake[0];
   let d = Math.hypot(dx, dy) * (1 + gauss(rnd) * shake[1]);
   ang = Math.max(-1.2, Math.min(1.2, ang));
-  d = Math.max(0.3, Math.min(14.5, d));
+  d = Math.max(0.3, Math.min(12, d));
   const v0 = Math.sqrt(2 * DEC * d) + DEC * DT / 2;
   return { vx: v0 * Math.sin(ang), vy: v0 * Math.cos(ang) };
 }
@@ -279,7 +304,8 @@ function stepPhysics(balls, onHit, onOut) {
   }
   for (const b of balls) {
     if (b.dead) continue;
-    if (b.x < 0 || b.x > W || b.y > L || b.y < VIEW.y0) onOut(b);
+    // 外周ラインに ふれたら アウト（規則10.10.1）
+    if (b.x - b.r < 0 || b.x + b.r > W || b.y + b.r > L || b.y < -BOX) onOut(b);
   }
 }
 
@@ -290,9 +316,11 @@ const S = {
   opt: { opp: 'friend', ends: 2, balls: 6, shake: 1, sound: 1 },
   end: 1, score: { r: 0, b: 0 }, jackTeam: 'r',
   balls: [], left: { r: 6, b: 6 }, stage: 'jack', phase: 'aim',
-  thrower: 'r', last: null, marker: { x: W / 2, y: 6 },
-  result: null, jackReset: false
+  thrower: 'r', last: null, marker: { x: W / 2, y: 5 },
+  result: null, jackReset: false, tie: false,
+  tb: 0, tbFirst: null, tbWinner: null
 };
+let cpuTimer = 0;
 const isCPU = t => S.opt.opp === 'cpu' && t === 'b';
 const jackBall = () => S.balls.find(b => b.team === 'j' && !b.dead);
 const canAim = () => S.phase === 'aim' && !isCPU(S.thrower);
@@ -329,16 +357,33 @@ function say(t) {
 
 /* ---------- ゲームの ながれ ---------- */
 function startGame() {
+  stopCPU();
   S.end = 1; S.score = { r: 0, b: 0 }; S.jackTeam = 'r';
+  S.tb = 0; S.tbFirst = null; S.tbWinner = null;
   $('setup').classList.add('hidden'); $('game').classList.remove('hidden');
   startEnd(); resize();
 }
-function startEnd() {
+function resetEnd() {
   S.balls = []; S.left = { r: S.opt.balls, b: S.opt.balls };
-  S.stage = 'jack'; S.phase = 'aim'; S.thrower = S.jackTeam; S.last = null; S.result = null;
-  S.marker = { x: W / 2, y: 6.5 };
+  S.last = null; S.result = null; S.tie = false; S.jackReset = false;
+  S.marker = { x: W / 2, y: CROSS.y };
+}
+/* ふつうの エンド：赤は 奇数エンド、青は 偶数エンドで ジャックを なげる（規則10.4.1） */
+function startEnd() {
+  resetEnd();
+  S.stage = 'jack'; S.phase = 'aim'; S.thrower = S.jackTeam;
   updateUI(); draw();
   say(`${NAME[S.jackTeam]}が しろい ボールを なげるよ`);
+}
+/* タイブレイク：ジャックは クロスに おいて はじめる（規則13） */
+function startTiebreak() {
+  S.tb++;
+  S.tbFirst = S.tb === 1 ? (Math.random() < 0.5 ? 'r' : 'b') : other(S.tbFirst);
+  resetEnd();
+  S.balls.push(placeJack([], { team: 'j', x: 0, y: 0, r: JR, m: 0.8, vx: 0, vy: 0, dead: false }));
+  S.stage = 'play'; S.phase = 'aim'; S.thrower = S.tbFirst;
+  updateUI(); draw();
+  say(`タイブレイク！ ${NAME[S.tbFirst]}が さきに なげるよ`);
 }
 
 function throwCurrent(target, shake) {
@@ -351,29 +396,38 @@ function throwCurrent(target, shake) {
   updateUI();
 }
 
+/* アウト：いったん コートから とりのぞく（ジャックは とまってから クロスへ） */
 function onOut(b) {
-  if (b.team === 'j' && S.stage !== 'jack') {
-    b.x = CROSS.x; b.y = CROSS.y; b.vx = 0; b.vy = 0; S.jackReset = true;
-  } else { b.dead = true; b.vx = 0; b.vy = 0; }
+  b.dead = true; b.vx = 0; b.vy = 0;
+  if (b.team === 'j') b.out = true;
 }
 
 function onSettled() {
-  for (const b of S.balls) if (b.team !== 'j' && !b.dead && b.y < vLineY(b.x)) b.dead = true;
   if (S.stage === 'jack') {
     const j = jackBall();
-    if (j && j.y >= vLineY(j.x)) {
-      S.stage = 'play'; S.thrower = S.jackTeam;
-      say(`${NAME[S.jackTeam]}が さいしょに なげるよ`);
+    if (j && jackCrossed(j)) {
+      // ジャックを 有効エリアに なげた サイドが さいしょの カラーボールを なげる（規則10.6.1）
+      S.stage = 'play';
+      say(`${NAME[S.thrower]}が さいしょに なげるよ`);
     } else {
-      S.balls = S.balls.filter(b => b.team !== 'j');
-      say('しろい ボールが ラインを こえなかったよ。もう いちど');
+      // 失敗したら つぎの サイドが ジャックを なげる（規則10.5.2）
+      S.balls = [];
+      S.thrower = other(S.thrower);
+      say(`しろい ボールは やりなおし。${NAME[S.thrower]}が なげるよ`);
     }
   } else {
-    if (S.jackReset) say('しろい ボールが そとに でたので まんなかに もどすよ');
-    const n = nextThrower(S.left, S.balls, jackBall(), S.last);
-    if (n === null) { finishEnd(); return; }
-    if (!S.jackReset) say(n !== S.last ? `${NAME[n]}の ばん` : `${NAME[n]}が もう いちど`);
-    S.thrower = n;
+    // スローイングエリアに もどった カラーボールは アウト
+    for (const b of S.balls) if (b.team !== 'j' && !b.dead && b.y - b.r < 0) b.dead = true;
+    // ジャックが 場外 または ジャック無効エリアに でたら クロスへ（規則10.11）
+    const j = S.balls.find(b => b.team === 'j');
+    if (j && (j.out || inJackInvalid(j))) { placeJack(S.balls, j); S.jackReset = true; }
+    const n = nextThrower(S.left, S.balls, jackBall(), S.last, S.tie);
+    S.tie = n.tie;
+    if (n.team === null) { finishEnd(); return; }
+    if (S.jackReset) say(`しろい ボールを まんなかに もどすよ。${NAME[n.team]}の ばん`);
+    else if (n.tie) say(`おなじ きょり！ ${NAME[n.team]}が なげるよ`);
+    else say(n.team !== S.last ? `${NAME[n.team]}の ばん` : `${NAME[n.team]}が もう いちど`);
+    S.thrower = n.team;
   }
   S.phase = 'aim';
   updateUI(); draw();
@@ -381,35 +435,63 @@ function onSettled() {
 
 function finishEnd() {
   const res = scoreEnd(S.balls, jackBall());
-  S.score.r += res.pts.r; S.score.b += res.pts.b;
   S.result = res; S.phase = 'result';
+  clearTimeout(msgTimer); $('msg').classList.remove('show');
   let t;
-  if (res.team === null) t = 'とくてん なし';
-  else if (res.team === 'tie') t = 'おなじ きょり！ りょうほうに とくてん';
-  else t = `${NAME[res.team]}に ${res.pts[res.team]}てん！`;
+  if (S.tb > 0) {
+    // タイブレイクの 得点は 総得点に いれない（規則10.16.5）
+    if (res.team === 'r' || res.team === 'b') { S.tbWinner = res.team; t = `タイブレイク：${NAME[res.team]}の かち！`; }
+    else t = 'タイブレイクも どうてん';
+  } else {
+    S.score.r += res.pts.r; S.score.b += res.pts.b;
+    if (res.team === null) t = 'とくてん なし';
+    else if (res.team === 'tie') t = 'おなじ きょり！ りょうほうに とくてん';
+    else t = `${NAME[res.team]}に ${res.pts[res.team]}てん！`;
+  }
   $('resultText').textContent = t;
   $('resultText').style.color = res.team === 'r' ? COLOR.r : res.team === 'b' ? COLOR.b : 'inherit';
-  $('nextBtn').textContent = S.end >= S.opt.ends ? 'けっかを みる' : 'つぎの エンドへ';
+  $('nextBtn').textContent = nextLabel();
   [523, 659, 784].forEach((f, i) => tone(f, 0.25, 0.15, 'sine', i * 0.12));
   updateUI(); draw();
 }
 
+function nextLabel() {
+  if (S.tb > 0) return S.tbWinner ? 'けっかを みる' : 'もう いちど タイブレイク';
+  if (S.end < S.opt.ends) return 'つぎの エンドへ';
+  return S.score.r === S.score.b ? 'タイブレイクへ' : 'けっかを みる';
+}
+
 function nextEnd() {
-  if (S.end >= S.opt.ends) { showFinal(); return; }
-  S.end++; S.jackTeam = other(S.jackTeam); startEnd();
+  if (S.tb > 0 || S.end >= S.opt.ends) {
+    if (S.tbWinner || (S.tb === 0 && S.score.r !== S.score.b)) showFinal();
+    else startTiebreak();
+    return;
+  }
+  S.end++; S.jackTeam = S.end % 2 === 1 ? 'r' : 'b'; startEnd();
+}
+
+function winner() {
+  const { r, b } = S.score;
+  return r > b ? 'r' : b > r ? 'b' : S.tbWinner;
 }
 
 function showFinal() {
-  const { r, b } = S.score;
-  const title = r > b ? 'あかの かち！' : b > r ? 'あおの かち！' : 'ひきわけ！';
-  openOverlay(title, `<div class="big"><span class="r">${r}</span> − <span class="b">${b}</span></div>`, [
+  const { r, b } = S.score, w = winner();
+  const note = S.tbWinner ? '<div style="font-size:18px">タイブレイクで けってい</div>' : '';
+  openOverlay(`${NAME[w]}の かち！`, `<div class="big"><span class="r">${r}</span> − <span class="b">${b}</span></div>${note}`, [
     { label: 'もう いちど', main: true, fn: () => { closeOverlay(); startGame(); } },
     { label: 'せってい', fn: () => { closeOverlay(); toSetup(); } }
   ]);
-  $('ovTitle').style.color = r > b ? COLOR.r : b > r ? COLOR.b : 'inherit';
+  $('ovTitle').style.color = COLOR[w];
+}
+
+function stopCPU() {
+  clearTimeout(cpuTimer); cpuTimer = 0;
+  if (S.phase === 'cpu') S.phase = 'aim';
 }
 
 function toSetup() {
+  stopCPU(); cancelAnimationFrame(rafId);
   S.phase = 'aim'; S.balls = [];
   $('game').classList.add('hidden'); $('setup').classList.remove('hidden');
 }
@@ -417,7 +499,7 @@ function toSetup() {
 /* コンピュータの ねらい */
 function cpuTarget() {
   const rnd = Math.random;
-  if (S.stage === 'jack') return { x: 1.8 + rnd() * 2.4, y: 5 + rnd() * 4.5 };
+  if (S.stage === 'jack') return { x: 1.8 + rnd() * 2.4, y: 4 + rnd() * 4.5 };
   const j = jackBall();
   const opp = S.balls.filter(b => b.team === 'r' && !b.dead).sort((a, c) => dist(a, j) - dist(c, j))[0];
   if (opp && dist(opp, j) < 0.45 && dist(opp, j) < closest(S.balls, j, 'b') && rnd() < 0.5) {
@@ -432,7 +514,12 @@ function pressThrow() {
   ensureAudio();
   if (isCPU(S.thrower)) {
     S.phase = 'cpu'; S.marker = cpuTarget(); updateUI(); draw();
-    setTimeout(() => { throwCurrent(S.marker, CPU_SHAKE); runLoop(); }, 600);
+    clearTimeout(cpuTimer);
+    cpuTimer = setTimeout(() => {
+      cpuTimer = 0;
+      if (S.phase !== 'cpu' || $('game').classList.contains('hidden')) return;
+      throwCurrent(S.marker, CPU_SHAKE); runLoop();
+    }, 600);
   } else {
     throwCurrent(S.marker, SHAKE[S.opt.shake]); runLoop();
   }
@@ -457,7 +544,7 @@ function updateUI() {
     for (let i = 0; i < S.opt.balls; i++) h += `<i class="${i < S.left[t] ? '' : 'used'}"></i>`;
     el.innerHTML = h;
   }
-  $('endLabel').textContent = `エンド ${S.end} / ${S.opt.ends}`;
+  $('endLabel').textContent = S.tb > 0 ? 'タイブレイク' : `エンド ${S.end} / ${S.opt.ends}`;
   const turn = $('turn');
   if (S.phase === 'result') { turn.textContent = 'けっか'; turn.style.background = '#2b2b2b'; }
   else {
@@ -525,8 +612,8 @@ function draw() {
   ctx.strokeRect(sx(0), sy(L), W * s, L * s);
   // ボックス
   ctx.beginPath();
-  for (let i = 1; i < 6; i++) { ctx.moveTo(sx(i), sy(0)); ctx.lineTo(sx(i), sy(-1.5)); }
-  ctx.moveTo(sx(0), sy(0)); ctx.lineTo(sx(0), sy(-1.5)); ctx.lineTo(sx(W), sy(-1.5)); ctx.lineTo(sx(W), sy(0));
+  for (let i = 1; i < 6; i++) { ctx.moveTo(sx(i), sy(0)); ctx.lineTo(sx(i), sy(-BOX)); }
+  ctx.moveTo(sx(0), sy(0)); ctx.lineTo(sx(0), sy(-BOX)); ctx.lineTo(sx(W), sy(-BOX)); ctx.lineTo(sx(W), sy(0));
   ctx.stroke();
   // V ライン
   ctx.beginPath(); ctx.moveTo(sx(0), sy(vLineY(0))); ctx.lineTo(sx(W / 2), sy(vLineY(W / 2))); ctx.lineTo(sx(W), sy(vLineY(W))); ctx.stroke();
@@ -649,9 +736,11 @@ function openOverlay(title, body, btns) {
 }
 function closeOverlay() { $('overlay').classList.add('hidden'); }
 $('menuBtn').addEventListener('click', () => {
+  // コンピュータの 投球まちは とりけし、もどったら もう いちど ボタンを おす
+  if (S.phase === 'cpu') { stopCPU(); updateUI(); draw(); }
   openOverlay('おわる？', '', [
     { label: 'つづける', main: true, fn: closeOverlay },
-    { label: 'おわる', fn: () => { closeOverlay(); cancelAnimationFrame(rafId); toSetup(); } }
+    { label: 'おわる', fn: () => { closeOverlay(); toSetup(); } }
   ]);
 });
 
@@ -674,7 +763,7 @@ if (document.fonts && document.fonts.ready) document.fonts.ready.then(draw);
 document.addEventListener('gesturestart', e => e.preventDefault());
 
 /* テスト用 */
-window.__BOCCIA = { S, W, L, BR, JR, CROSS, LAUNCH, vLineY, nextThrower, scoreEnd, clampMarker, launchVelocity, stepPhysics, allStopped, throwCurrent, onOut, onSettled, cpuTarget, startGame, nextEnd, jackBall };
+window.__BOCCIA = { S, W, L, BOX, BR, JR, CROSS, LAUNCH, vLineY, jackCrossed, inJackInvalid, placeJack, nextThrower, scoreEnd, clampMarker, launchVelocity, stepPhysics, allStopped, throwCurrent, onOut, onSettled, cpuTarget, startGame, startTiebreak, nextEnd, jackBall, pressThrow, toSetup, winner };
 })();
 </script>
 </body>
